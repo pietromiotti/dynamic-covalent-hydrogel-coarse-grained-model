@@ -1,0 +1,138 @@
+variable   kbT equal 1.0
+
+boundary        p p p
+atom_style      molecular
+units       	lj
+read_data	${fname} extra/bond/per/atom 50 extra/special/per/atom 100
+
+variable        Lx equal xhi
+variable        Ly equal yhi
+variable        Lz equal zhi
+
+variable 	boxsolventZHI equal ${Lz}
+variable 	boxsolventZLO equal 0.0
+region          domain prism 0 ${Lx} 0 ${Ly} 0.00 ${boxsolventZHI} 0 0 0
+variable        Nsolvent equal 3*${Lx}*${Ly}*${Lz}
+create_atoms  1 random ${Nsolvent} ${seed} domain
+
+pair_style dpd ${kbT} 1.0 ${seed}
+pair_coeff 1 1 5.0 4.5 1.0
+pair_coeff 1 2 2.5 4.5 1.0
+pair_coeff 1 3 2.5 4.5 1.0
+pair_coeff 1 4 2.5 4.5 1.0
+
+pair_coeff 2 2 5.0 4.5 1.0
+pair_coeff 2 3 5.0 4.5 1.0
+pair_coeff 2 4 5.0 4.5 1.0
+
+pair_coeff 3 3 5.0 4.5 1.0
+pair_coeff 4 4 5.0 4.5 1.0
+pair_coeff 3 4 0.0 4.5 1.0
+
+variable r0morse equal 0.1
+variable lmax equal 2.0
+variable distunbind equal 0.1
+variable Dmorse equal 40.0
+variable alpha equal 1.0
+variable maxcutoff equal 0.725
+variable lmaxnewbond equal 0.725
+variable distbind equal 0.75
+
+bond_style hybrid fene/nostress morse
+bond_coeff 1 fene/nostress 7.0 ${lmax} 1.0 0.1
+bond_coeff 2 morse ${Dmorse} ${alpha} ${r0morse}
+
+mass * 1.0
+
+neighbor        0.5 bin
+
+group functionalGroup type 3 4
+
+comm_style brick
+comm_modify mode single cutoff 6.0 vel yes
+neigh_modify every 1 one 10000
+
+compute activebonds all activebonds
+
+velocity 	all create 1.0 12345
+
+variable pbind equal 0.9
+variable lambda equal 0.01
+variable unbind equal 0.07
+
+fix		integrator all nve
+
+timestep        0.001
+
+run_style 	verlet
+
+variable abonds equal c_activebonds[1]
+
+group toprint type 1 2 3 4
+group polymer type 2 3 4
+group nowall type 1 2 3 4
+group solvent type 1
+
+group tobounceback_w type 1
+group tobounceback_nw type 2 3 4
+
+variable equilibration equal 10000
+
+run ${equilibration}
+
+fix   2 functionalGroup bond/create/reversible 2500 3 4 ${distbind} 2 prob ${pbind} ${seed} iparam 1 3 jparam 1 4
+fix   3 functionalGroup bond/break/bell 2500 2 ${distunbind} prob ${unbind} ${lambda} ${kbT} ${seed} ${maxcutoff}
+
+variable brokenbonds equal f_3[2]
+variable derBrk equal f_3[1]
+variable createdbonds equal f_2[2]
+variable derCrt equal f_2[1]
+
+fix print all print 250 "${abonds} ${brokenbonds} ${derBrk} ${createdbonds} ${derCrt}" file abonds_${seed}.out screen no
+
+variable init equal 500000
+
+unfix integrator
+group torigid type 2 3 4
+group notrigid type 1
+fix rigidall torigid rigid/nve/small molecule
+fix integrator notrigid nve
+
+run ${init}
+
+write_restart ../restart.data
+write_data save.atom
+
+variable A equal 3.0
+variable T equal ${Tpp}
+variable omega equal 2.0*PI/$T
+variable x equal "v_A * sin(2*PI * (step-v_init-v_equilibration)*dt/v_T)"
+variable v equal "2*PI*v_A/v_T * cos(2*PI * (step-v_init-v_equilibration)*dt/v_T)"
+variable oscillate equal "-4*PI*PI*v_A*v_A/v_T/v_T * sin(2*PI * (step-v_init-v_equilibration)*dt/v_T)"
+fix 10 all deform 1 xz variable v_x v_v remap v
+
+variable halfbox equal ${Lz}/2
+
+region upper  prism 0 ${Lx} 0 ${Ly} ${halfbox} ${Lz} 0 0 0
+region lower  prism 0 ${Lx} 0 ${Ly} 0 ${halfbox}  0 0 0
+
+group upper_group dynamic all region upper every 100
+group lower_group dynamic all region lower every 100
+
+compute peratomall all stress/atom NULL bond
+compute pall all reduce sum c_peratomall[5]
+
+compute peratomall_upper upper_group stress/atom NULL bond
+compute pall_upper upper_group reduce sum c_peratomall_upper[5]
+compute peratomall_lower lower_group stress/atom NULL bond
+compute pall_lower lower_group reduce sum c_peratomall_lower[5]
+
+variable pxztot_upper equal c_pall_upper/(${Lx}*${Ly}*${halfbox})
+variable pxztot_lower equal c_pall_lower/(${Lx}*${Ly}*${halfbox})
+variable pxztot equal c_pall/(${Lx}*${Ly}*${Lz})
+
+fix def1 all print 1 "$(time) ${x} ${v} ${pxztot} ${pxztot_upper} ${pxztot_lower}" file stress_${T}_${seed}.txt screen no
+
+thermo		1000
+
+run ${iters}
